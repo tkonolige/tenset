@@ -206,6 +206,28 @@ class Dataset:
     def __len__(self, ):
         return sum(len(x) for x in self.throughputs.values())
 
+    def to_h5(self, file):
+        import h5py
+        with h5py.File(open(file, "w+b"), "a") as f:
+            assert self.features.keys() == self.throughputs.keys() == self.min_latency.keys()
+            f["raw_files"] = self.raw_files
+            # features is OrderedDict[LearningTask, numpy[numpy[]]]
+            f["workload_keys"] = [str(x.workload_key) for x in self.features.keys()]
+            f["targets"] = [x.target for x in self.features.keys()]
+            g = f.create_group("features")
+            dt = h5py.vlen_dtype("float64")
+            for i, k in enumerate(self.features.keys()):
+                feat = self.features[k]
+                dset = g.create_dataset(f'feature_{i}', feat.shape, dtype=dt)
+                for j, x in enumerate(feat):
+                    dset[j] = x.astype("float64")
+
+            dset = g.create_dataset(f"throughtputs", (len(self.throughputs),), dtype=dt)
+            for i, v in enumerate(self.throughputs.values()):
+                dset[i] = v
+
+            g["min_latency"] = self.min_latency.values()
+
 
 def make_dataset_from_log_file(log_files, out_file, min_sample_size, verbose=1):
     """Make a dataset file from raw log files"""
