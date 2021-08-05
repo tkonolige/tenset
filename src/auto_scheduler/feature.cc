@@ -1292,8 +1292,7 @@ void GetPerStoreFeatureName(int max_n_bufs, std::vector<std::string>* ret) {
   // section total : 3
 }
 
-void GetPerStoreFeaturesWorkerFunc(const SearchTask& task, const State& state, int max_n_bufs,
-                                   std::vector<float>* feature, std::atomic<int>* error_ct) {
+tir::PrimFunc LowerForFeatureExtraction(const SearchTask& task, const State& state) {
   te::Schedule sch;
   Array<te::Tensor> tensors;
 
@@ -1304,61 +1303,66 @@ void GetPerStoreFeaturesWorkerFunc(const SearchTask& task, const State& state, i
   sch = sch.normalize_for_feature_extraction();
   auto bounds = te::InferBound(sch);
 
+  auto stmt = te::ScheduleOps(sch, bounds, false);
+  Map<te::Tensor, te::Buffer> out_binds;
+  Array<ObjectRef> out_arg_list;
+  bool compact = te::VerifyCompactBuffer(stmt);
+  const std::string& name = "main";
+  GlobalVar global_var(name);
+
+  // Copied from driver_api.cc::lower
+  auto pass_ctx = tvm::transform::PassContext::Current();
+  GetBinds(tensors, compact, std::unordered_map<te::Tensor, te::Buffer>(), &out_binds,
+           &out_arg_list);
+  tir::PrimFunc f = te::SchedulePostProcToPrimFunc(out_arg_list, std::move(stmt), out_binds);
+  f = WithAttr(std::move(f), "global_symbol", runtime::String(name));
+
+  bool noalias = pass_ctx->GetConfig<Bool>("tir.noalias", Bool(true)).value();
+  bool disable_vectorize =
+      pass_ctx->GetConfig<Bool>("tir.disable_vectorize", Bool(false)).value();
+  bool instrument_bound_checkers =
+      pass_ctx->GetConfig<Bool>("tir.instrument_bound_checkers", Bool(false)).value();
+
+  if (noalias) {
+    f = WithAttr(std::move(f), "tir.noalias", Bool(true));
+  }
+  auto mod = IRModule(Map<GlobalVar, BaseFunc>({{global_var, f}}));
+
+  if (IsGPUTask(task)) {
+    auto pass_list = Array<tvm::transform::Pass>();
+    // Phase 0
+    pass_list.push_back(tir::transform::InjectPrefetch());
+    pass_list.push_back(tir::transform::StorageFlatten(64, instrument_bound_checkers));
+    // Phase 1
+    pass_list.push_back(tir::transform::NarrowDataType(32));
+    pass_list.push_back(tir::transform::Simplify());
+    pass_list.push_back(tir::transform::VectorizeLoop(!disable_vectorize));
+    pass_list.push_back(tir::transform::InjectVirtualThread());
+    pass_list.push_back(tir::transform::StorageRewrite());
+    pass_list.push_back(tir::transform::Simplify());
+    tvm::Map<String, tvm::PrimExpr> gpu_params{
+        {"max_shared_memory_per_block", task->hardware_params->max_shared_memory_per_block},
+        {"max_local_memory_per_block", task->hardware_params->max_local_memory_per_block},
+        {"max_threads_per_block", task->hardware_params->max_threads_per_block},
+        {"max_vector_bytes", task->hardware_params->vector_unit_bytes},
+        {"max_vthread", task->hardware_params->max_vthread_extent},
+    };
+    pass_list.push_back(tir::transform::VerifyGPUCode(gpu_params));
+    const auto& optimize = tir::transform::Sequential(pass_list);
+    optimize(mod);
+  }
+  const auto& optimize =
+      tir::transform::Sequential(Array<tvm::transform::Pass>{tir::transform::Simplify()});
+  mod = optimize(std::move(mod));
+  const auto& it = mod->functions.find(global_var);
+  ICHECK(it != mod->functions.end());
+  return Downcast<tir::PrimFunc>((*it).second) ; // TODO: is this returning a reference to a local?
+}
+
+void GetPerStoreFeaturesWorkerFunc(const SearchTask& task, const State& state, int max_n_bufs,
+                                   std::vector<float>* feature, std::atomic<int>* error_ct) {
   try {
-    auto stmt = te::ScheduleOps(sch, bounds, false);
-    Map<te::Tensor, te::Buffer> out_binds;
-    Array<ObjectRef> out_arg_list;
-    bool compact = te::VerifyCompactBuffer(stmt);
-    const std::string& name = "main";
-    GlobalVar global_var(name);
-
-    // Copied from driver_api.cc::lower
-    auto pass_ctx = tvm::transform::PassContext::Current();
-    GetBinds(tensors, compact, std::unordered_map<te::Tensor, te::Buffer>(), &out_binds,
-             &out_arg_list);
-    tir::PrimFunc f = te::SchedulePostProcToPrimFunc(out_arg_list, std::move(stmt), out_binds);
-    f = WithAttr(std::move(f), "global_symbol", runtime::String(name));
-
-    bool noalias = pass_ctx->GetConfig<Bool>("tir.noalias", Bool(true)).value();
-    bool disable_vectorize =
-        pass_ctx->GetConfig<Bool>("tir.disable_vectorize", Bool(false)).value();
-    bool instrument_bound_checkers =
-        pass_ctx->GetConfig<Bool>("tir.instrument_bound_checkers", Bool(false)).value();
-
-    if (noalias) {
-      f = WithAttr(std::move(f), "tir.noalias", Bool(true));
-    }
-    auto mod = IRModule(Map<GlobalVar, BaseFunc>({{global_var, f}}));
-
-    if (IsGPUTask(task)) {
-      auto pass_list = Array<tvm::transform::Pass>();
-      // Phase 0
-      pass_list.push_back(tir::transform::InjectPrefetch());
-      pass_list.push_back(tir::transform::StorageFlatten(64, instrument_bound_checkers));
-      // Phase 1
-      pass_list.push_back(tir::transform::NarrowDataType(32));
-      pass_list.push_back(tir::transform::Simplify());
-      pass_list.push_back(tir::transform::VectorizeLoop(!disable_vectorize));
-      pass_list.push_back(tir::transform::InjectVirtualThread());
-      pass_list.push_back(tir::transform::StorageRewrite());
-      pass_list.push_back(tir::transform::Simplify());
-      tvm::Map<String, tvm::PrimExpr> gpu_params{
-          {"max_shared_memory_per_block", task->hardware_params->max_shared_memory_per_block},
-          {"max_local_memory_per_block", task->hardware_params->max_local_memory_per_block},
-          {"max_threads_per_block", task->hardware_params->max_threads_per_block},
-          {"max_vector_bytes", task->hardware_params->vector_unit_bytes},
-          {"max_vthread", task->hardware_params->max_vthread_extent},
-      };
-      pass_list.push_back(tir::transform::VerifyGPUCode(gpu_params));
-      const auto& optimize = tir::transform::Sequential(pass_list);
-      optimize(mod);
-    }
-    const auto& optimize =
-        tir::transform::Sequential(Array<tvm::transform::Pass>{tir::transform::Simplify()});
-    mod = optimize(std::move(mod));
-    const auto& it = mod->functions.find(global_var);
-    ICHECK(it != mod->functions.end());
-    const auto& prim_func = (*it).second.as<PrimFuncNode>();
+    tir::PrimFunc prim_func = LowerForFeatureExtraction(task, state);
     GetPerStoreFeature(prim_func->body, task->hardware_params->cache_line_bytes, max_n_bufs,
                        feature);
   } catch (Error& e) {
@@ -1691,6 +1695,8 @@ TVM_REGISTER_GLOBAL("auto_scheduler.GetPerStoreFeatureNames")
       }
       *ret = arr;
     });
+
+TVM_REGISTER_GLOBAL("auto_scheduler.LowerForFeatureExtraction").set_body_typed(LowerForFeatureExtraction);
 
 }  // namespace auto_scheduler
 }  // namespace tvm

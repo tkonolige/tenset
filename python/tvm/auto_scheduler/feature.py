@@ -157,6 +157,21 @@ def unpack_feature(byte_arr: bytearray) -> Tuple[np.ndarray, np.ndarray, np.ndar
         np.array(min_costs),
     )
 
+
+# def pack(features):
+#     n = features.shape[0]
+#     total_bytes = 0
+#     size_vector_size = 1 + n + 3;
+#     total_bytes += size_vector_size * struct.calcsize("i")
+#     size_vector = [n]
+#     for x in features:
+#         size_vector.append(x.size)
+#         total_bytes += struct.calcsize("f") * x.size
+#     size_vector.append(len(self.normalized_throughputs))
+#     size_vector.append(len(
+#     bytearray(
+
+
 def get_per_store_features_from_file(
     filename: str, max_lines: int, max_n_bufs: Optional[int] = None
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:

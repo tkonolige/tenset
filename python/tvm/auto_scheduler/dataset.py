@@ -294,6 +294,7 @@ def make_dataset_from_log_file(log_files, out_file, min_sample_size, verbose=1):
         del dataset.min_latency[task]
 
     # Save to disk
+    # dataset.to_h5(out_file)
     pickle.dump(dataset, open(out_file, "wb"))
 
     if verbose >= 0:

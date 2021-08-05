@@ -122,7 +122,7 @@ class SegmentDataLoader:
     def _fetch_indices(self, indices):
         segment_sizes = self.segment_sizes[indices]
 
-        feature_offsets = self.feature_offsets[indices]
+        feature_offsets = self.feature_offsets[indices.numpy()]
         feature_indices = np.empty((segment_sizes.sum(),), dtype=np.int32)
         ct = 0
         for offset, seg_size in zip(feature_offsets, segment_sizes.numpy()):
@@ -178,6 +178,7 @@ class SegmentSumMLPModule(torch.nn.Module):
         features = self.segment_encoder(
             features
         )
+
         segment_indices = torch.repeat_interleave(
             torch.arange(n_seg, device=device), segment_sizes
         )
@@ -322,11 +323,10 @@ class MLPModelInternal:
     def __init__(self, device=None, few_shot_learning="base_only", use_workload_embedding=True, use_target_embedding=False,
                  loss_type='lambdaRankLoss'):
         if device is None:
-            if torch.cuda.device_count():
+            if False and torch.cuda.device_count():
                 device = 'cuda:0'
             else:
                 device = 'cpu'
-        print(device)
         # Common parameters
         self.net_params = {
             "type": "SegmentSumMLP",
@@ -852,7 +852,7 @@ class LambdaRankLoss(torch.nn.Module):
 
     def forward(self, preds, labels, k=None, eps=1e-10, mu=10., sigma=1., device=None):
         if device is None:
-            if torch.cuda.device_count():
+            if False and torch.cuda.device_count():
                 device = 'cuda:0'
             else:
                 device = 'cpu'
